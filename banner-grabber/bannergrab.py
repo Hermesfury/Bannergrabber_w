@@ -1,249 +1,397 @@
-# web_fingerprinter.py
-# Advanced stack detection: Apache, PHP, WordPress, OpenSSL, OS
+#!/usr/bin/env python3
+"""
+Enhanced Banner Grabbing Tool for Reconnaissance
+Supports multiple protocols, multi-threading, and detailed extraction
+"""
+
 import socket
 import ssl
-import re
+import threading
+import argparse
+import json
+import csv
 from datetime import datetime
-import urllib.parse
+import time
+import random
+import re
+import concurrent.futures
 
-def fetch_response(ip, port, path="/", method="GET", headers={}):
-    """Fetch HTTP/HTTPS response with custom headers"""
-    try:
-        if port == 443:
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            sock = context.wrap_socket(
-                socket.socket(socket.AF_INET, socket.SOCK_STREAM),
-                server_hostname=headers.get("Host", ip)
-            )
-        else:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# Default common service ports
+DEFAULT_PORTS = {
+    21: 'FTP',
+    22: 'SSH',
+    23: 'Telnet',
+    25: 'SMTP',
+    53: 'DNS',
+    80: 'HTTP',
+    110: 'POP3',
+    143: 'IMAP',
+    443: 'HTTPS',
+    993: 'IMAPS',
+    995: 'POP3S',
+    3389: 'RDP'
+}
 
-        sock.settimeout(5)
-        sock.connect((ip, port))
+class BannerGrabber:
+    def __init__(self, timeout=5, verbose=False, stealth=False):
+        self.timeout = timeout
+        self.verbose = verbose
+        self.stealth = stealth
 
-        host = headers.get("Host", ip)
-        request_lines = [
-            f"{method} {path} HTTP/1.1",
-            f"Host: {host}",
-            "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-            "Accept: text/html,application/xhtml+xml",
-            "Accept-Language: en-US",
-            "Connection: close"
-        ]
-        for k, v in headers.items():
-            if k != "Host":
-                request_lines.append(f"{k}: {v}")
-
-        request = "\r\n".join(request_lines) + "\r\n\r\n"
-        sock.send(request.encode())
-        response = sock.recv(8192).decode(errors='ignore')
-        sock.close()
-        return response
-    except Exception as e:
-        return f"Error: {e}"
-
-def extract_header(response, header):
-    for line in response.splitlines():
-        if line.lower().startswith(header.lower() + ":"):
-            return line.strip()
-    return None
-
-def detect_php(response):
-    """Detect PHP version from headers or body"""
-    # 1. X-Powered-By: PHP/8.1.12
-    powered = extract_header(response, "X-Powered-By")
-    if powered and "PHP" in powered:
-        ver_match = re.search(r'PHP\/([\d\.]+)', powered, re.I)
-        if ver_match:
-            return f"PHP {ver_match.group(1)}", powered
-
-    # 2. Set-Cookie: PHPSESSID=
-    if "PHPSESSID" in response:
-        return "PHP (session detected)", None
-
-    # 3. HTML comments or paths like /wp-includes/
-    if re.search(r'/wp-content/|/wp-includes/|/xmlrpc.php', response, re.I):
-        return "PHP (WordPress pattern)", None
-
-    return None, None
-
-def detect_wordpress(response, url):
-    """Detect WordPress and version"""
-    clues = []
-
-    # 1. Meta generator: <meta name="generator" content="WordPress 6.5.3" />
-    gen_match = re.search(r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']WordPress ([\d\.]+)', response, re.I)
-    if gen_match:
-        clues.append(f"✅ WordPress {gen_match.group(1)} (via meta tag)")
-
-    # 2. Readme.html or license.txt
-    if "liCENSE" in response.upper() and "GNU" in response and "WordPress" in response:
-        clues.append("✅ WordPress license.txt detected")
-
-    # 3. /wp-login.php or /wp-admin/
-    if "wp-login" in response or "wp-admin" in response:
-        clues.append("🔹 wp-login/wp-admin detected")
-
-    # 4. REST API endpoint
-    if '/wp-json/wp/v2/' in response:
-        clues.append("✅ WordPress REST API exposed")
-
-    # 5. Version in JS/CSS paths: /wp-includes/js/jquery/jquery.min.js?ver=6.5.3
-    ver_match = re.search(r'[\?&]ver=([\d\.]+)', response)
-    if ver_match:
-        clues.append(f"📌 Possible version {ver_match.group(1)} from script")
-
-    return clues
-
-def detect_apache(response, ip, port):
-    """Detect Apache version even when hidden"""
-    clues = []
-
-    # 1. Direct Server header
-    server = extract_header(response, "Server")
-    if server and "Apache" in server:
-        clues.append(f"🔹 {server}")
-        ver = re.search(r'Apache[/ ]([\d\.]+)', server, re.I)
-        if ver:
-            clues.append(f"✅ Apache Version: {ver.group(1)}")
-
-    # 2. Default "It works!" page
-    if re.search(r"It works[\!]*[\s\S]*Apache Server", response, re.I):
-        clues.append("✅ Apache default page detected")
-
-    # 3. 404 Error page leak
-    error_resp = fetch_response(ip, port, "/nonexistent_" + str(hash(datetime.now())), "GET", {"Host": ip})
-    if "Apache" in error_resp and "404" in error_resp:
-        clues.append("✅ 404 error page leaks Apache")
-
-    # 4. mod_php in headers
-    if "X-Powered-By" in response and "PHP" in response:
-        clues.append("🔸 mod_php likely in use")
-
-    return clues
-
-def detect_ssl_version(ip):
-    """Try to get SSL/TLS version and OpenSSL clues"""
-    try:
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-        conn = context.wrap_socket(socket.socket(), server_hostname=ip)
-        conn.connect((ip, 443))
-        cert = conn.getpeercert()
-
-        # Subject/Issuer may leak software
-        subject = dict(x[0] for x in cert.get('subject', []))
-        issuer = dict(x[0] for x in cert.get('issuer', []))
-
-        cn = subject.get('commonName', '')
-        issuer_name = issuer.get('organizationName', '')
-
-        conn.close()
-
-        return {
-            "protocol": conn.version(),
-            "common_name": cn,
-            "issuer": issuer_name
+    def grab_banner(self, target, port):
+        """Grab banner from target:port"""
+        protocol = DEFAULT_PORTS.get(port, 'TCP')
+        result = {
+            'target': target,
+            'port': port,
+            'protocol': protocol,
+            'timestamp': datetime.now().isoformat(),
+            'banner': '',
+            'server_info': {},
+            'error': None
         }
-    except Exception as e:
-        return {"error": str(e)}
 
-def main():
-    print("🔍 FULL-STACK WEBSITE FINGERPRINTER")
-    print("🎯 Detects Apache, PHP, WordPress, SSL, and more")
-    print("🔐 Even when servers try to hide versions")
-    print("=" * 60)
+        try:
+            if protocol in ['HTTP', 'HTTPS']:
+                result.update(self._grab_http_banner(target, port))
+            elif protocol == 'FTP':
+                result.update(self._grab_ftp_banner(target, port))
+            elif protocol == 'SSH':
+                result.update(self._grab_ssh_banner(target, port))
+            elif protocol in ['SMTP', 'POP3', 'IMAP', 'POP3S', 'IMAPS']:
+                result.update(self._grab_mail_banner(target, port, protocol))
+            elif protocol == 'Telnet':
+                result.update(self._grab_telnet_banner(target, port))
+            elif protocol == 'RDP':
+                result.update(self._grab_rdp_banner(target, port))
+            else:
+                result.update(self._grab_generic_banner(target, port))
 
-    target = input("🌐 Enter domain (e.g., yoursite.com): ").strip()
-    if not target:
-        print("❌ Target required!")
-        return
+        except Exception as e:
+            result['error'] = str(e)
+            if self.verbose:
+                print(f"Error scanning {target}:{port} - {e}")
 
-    print("🔄 Resolving...")
+        return result
+
+    def _grab_http_banner(self, target, port):
+        """Grab HTTP/HTTPS banner"""
+        try:
+            if port == 443:
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                sock = context.wrap_socket(
+                    socket.socket(socket.AF_INET, socket.SOCK_STREAM),
+                    server_hostname=target
+                )
+            else:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+            sock.settimeout(self.timeout)
+            sock.connect((target, port))
+
+            request = (
+                "GET / HTTP/1.1\r\n"
+                f"Host: {target}\r\n"
+                "User-Agent: Mozilla/5.0 (compatible; BannerGrabber/1.0)\r\n"
+                "Connection: close\r\n\r\n"
+            )
+
+            sock.send(request.encode())
+            response = sock.recv(4096).decode(errors='ignore')
+            sock.close()
+
+            # Parse response
+            lines = response.split('\n')
+            status_line = lines[0] if lines else ''
+            headers = {}
+
+            for line in lines[1:]:
+                if ': ' in line:
+                    key, value = line.split(': ', 1)
+                    headers[key.strip()] = value.strip()
+
+            server_info = {
+                'status_line': status_line,
+                'server': headers.get('Server', ''),
+                'powered_by': headers.get('X-Powered-By', ''),
+                'content_type': headers.get('Content-Type', ''),
+                'os_info': self._extract_os_info(response)
+            }
+
+            return {
+                'banner': response[:200],  # First 200 chars
+                'server_info': server_info
+            }
+
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _grab_ftp_banner(self, target, port):
+        """Grab FTP banner"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.timeout)
+            sock.connect((target, port))
+            banner = sock.recv(1024).decode(errors='ignore').strip()
+            sock.close()
+
+            server_info = {
+                'server': self._extract_server_info(banner, r'(\w+.*FTP.*)'),
+                'version': self._extract_version(banner)
+            }
+
+            return {
+                'banner': banner,
+                'server_info': server_info
+            }
+
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _grab_ssh_banner(self, target, port):
+        """Grab SSH banner"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.timeout)
+            sock.connect((target, port))
+            banner = sock.recv(1024).decode(errors='ignore').strip()
+            sock.close()
+
+            server_info = {
+                'server': self._extract_server_info(banner, r'(SSH-\d+\.\d+.*)'),
+                'version': self._extract_version(banner)
+            }
+
+            return {
+                'banner': banner,
+                'server_info': server_info
+            }
+
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _grab_mail_banner(self, target, port, protocol):
+        """Grab mail service banner (SMTP, POP3, IMAP)"""
+        try:
+            if protocol in ['POP3S', 'IMAPS']:
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                sock = context.wrap_socket(
+                    socket.socket(socket.AF_INET, socket.SOCK_STREAM),
+                    server_hostname=target
+                )
+            else:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+            sock.settimeout(self.timeout)
+            sock.connect((target, port))
+            banner = sock.recv(1024).decode(errors='ignore').strip()
+            sock.close()
+
+            server_info = {
+                'server': self._extract_server_info(banner, r'(\w+.*)'),
+                'version': self._extract_version(banner)
+            }
+
+            return {
+                'banner': banner,
+                'server_info': server_info
+            }
+
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _grab_telnet_banner(self, target, port):
+        """Grab Telnet banner"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.timeout)
+            sock.connect((target, port))
+            banner = sock.recv(1024).decode(errors='ignore').strip()
+            sock.close()
+
+            server_info = {
+                'server': self._extract_server_info(banner, r'(\w+.*)'),
+                'os_info': self._extract_os_info(banner)
+            }
+
+            return {
+                'banner': banner,
+                'server_info': server_info
+            }
+
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _grab_rdp_banner(self, target, port):
+        """Grab RDP banner"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.timeout)
+            sock.connect((target, port))
+            # RDP initial response
+            banner = sock.recv(1024).decode(errors='ignore')
+            sock.close()
+
+            server_info = {
+                'server': 'Microsoft Terminal Services',
+                'protocol': 'RDP'
+            }
+
+            return {
+                'banner': banner[:200],
+                'server_info': server_info
+            }
+
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _grab_generic_banner(self, target, port):
+        """Grab generic TCP banner"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.timeout)
+            sock.connect((target, port))
+            banner = sock.recv(1024).decode(errors='ignore').strip()
+            sock.close()
+
+            server_info = {
+                'server': self._extract_server_info(banner, r'(\w+.*)'),
+                'os_info': self._extract_os_info(banner)
+            }
+
+            return {
+                'banner': banner,
+                'server_info': server_info
+            }
+
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _extract_server_info(self, banner, pattern):
+        """Extract server info using regex"""
+        match = re.search(pattern, banner, re.I)
+        return match.group(1) if match else ''
+
+    def _extract_version(self, banner):
+        """Extract version from banner"""
+        match = re.search(r'(\d+\.\d+(?:\.\d+)*)', banner)
+        return match.group(1) if match else ''
+
+    def _extract_os_info(self, banner):
+        """Extract OS information"""
+        os_patterns = {
+            'Linux': r'Linux',
+            'Windows': r'Windows|Microsoft',
+            'Unix': r'Unix|BSD',
+            'macOS': r'macOS|Darwin'
+        }
+
+        for os_name, pattern in os_patterns.items():
+            if re.search(pattern, banner, re.I):
+                return os_name
+        return ''
+
+def resolve_target(target):
+    """Resolve hostname to IP"""
     try:
-        ip = socket.gethostbyname(target)
-        print(f"✅ IP: {ip}")
+        return socket.gethostbyname(target)
     except socket.gaierror:
-        print("❌ Could not resolve domain.")
-        return
+        return target
 
-    # Scan both HTTP and HTTPS
-    ports = [80, 443]
-    results = {}
+def scan_target(grabber, target, ports, results, lock):
+    """Scan a single target across multiple ports"""
+    ip = resolve_target(target)
 
     for port in ports:
-        print(f"\n📡 Probing port {port}...")
-        response = fetch_response(ip, port, headers={"Host": target})
-        if response.startswith("Error"):
-            print(f"   ❌ {response}")
-            continue
+        if grabber.stealth:
+            time.sleep(random.uniform(0.1, 1.0))  # Random delay
 
-        results[port] = response
+        result = grabber.grab_banner(ip, port)
 
-        # Extract Server header
-        server = extract_header(response, "Server")
-        print(f"   {server or 'No Server header'}")
+        with lock:
+            results.append(result)
 
-    if not results:
-        print("❌ No responses. Check connectivity.")
-        return
+        if grabber.verbose:
+            status = "SUCCESS" if not result['error'] else "ERROR"
+            print(f"[{status}] {target}:{port} ({result['protocol']})")
 
-    print("\n" + "="*60)
-    print("🔍 FINAL ANALYSIS")
-    print("="*60)
+def save_results(results, output_format, filename):
+    """Save results to file"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = filename or f"banner_grab_results_{timestamp}.{output_format}"
 
-    # Run all detectors
-    for port, response in results.items():
-        print(f"\n📋 PORT {port} FINDINGS:")
+    if output_format == 'json':
+        with open(filename, 'w') as f:
+            json.dump(results, f, indent=2)
+    elif output_format == 'csv':
+        if results:
+            # Collect all possible server_info keys
+            all_server_keys = set()
+            for result in results:
+                all_server_keys.update(result['server_info'].keys())
 
-        # Apache
-        apache_clues = detect_apache(response, ip, port)
-        if apache_clues:
-            for c in apache_clues:
-                print(f"  {c}")
+            fieldnames = ['target', 'port', 'protocol', 'timestamp', 'banner', 'error'] + sorted(list(all_server_keys))
+            with open(filename, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for result in results:
+                    row = {k: v for k, v in result.items() if k != 'server_info'}
+                    row.update(result['server_info'])
+                    writer.writerow(row)
 
-        # PHP
-        php_ver, _ = detect_php(response)
-        if php_ver:
-            print(f"  ✅ {php_ver}")
+    print(f"Results saved to {filename}")
 
-        # WordPress
-        wp_clues = detect_wordpress(response, target)
-        for c in wp_clues:
-            print(f"  {c}")
+def main():
+    parser = argparse.ArgumentParser(description="Enhanced Banner Grabbing Tool")
+    parser.add_argument('targets', nargs='+', help='Target IPs or hostnames')
+    parser.add_argument('-p', '--ports', help='Port range (e.g., 1-1000) or comma-separated (e.g., 21,22,80)', default='21,22,23,25,53,80,110,143,443,993,995,3389')
+    parser.add_argument('-t', '--timeout', type=float, default=5.0, help='Connection timeout in seconds')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
+    parser.add_argument('-s', '--stealth', action='store_true', help='Enable stealth mode (random delays)')
+    parser.add_argument('-o', '--output', choices=['json', 'csv'], default='json', help='Output format')
+    parser.add_argument('-f', '--filename', help='Output filename (auto-generated if not specified)')
+    parser.add_argument('--threads', type=int, default=10, help='Number of threads')
 
-    # SSL Info
-    if 443 in results:
-        print(f"\n🔐 SSL/TLS INFO (port 443):")
-        ssl_info = detect_ssl_version(target)
-        if "error" not in ssl_info:
-            print(f"  Protocol: {ssl_info['protocol']}")
-            print(f"  Issuer: {ssl_info['issuer']}")
-            if "Let's Encrypt" not in ssl_info['issuer']:
-                print(f"  Common Name: {ssl_info['common_name']}")
-        else:
-            print(f"  ❌ SSL detection failed: {ssl_info['error']}")
+    args = parser.parse_args()
 
-    # Summary
-    print("\n💡 SUMMARY:")
-    found = []
-    if any("Apache" in c for r in results.values() for c in detect_apache(r, ip, 80)):
-        found.append("Apache")
-    php_ver, _ = detect_php(results.get(80) or results.get(443))
-    if php_ver:
-        found.append("PHP")
-    if any("WordPress" in c for r in results.values() for c in detect_wordpress(r, target)):
-        found.append("WordPress")
-
-    if found:
-        print(f"✅ Detected stack: {', '.join(found)}")
+    # Parse ports
+    if '-' in args.ports:
+        start, end = map(int, args.ports.split('-'))
+        ports = list(range(start, end + 1))
     else:
-        print("❌ No clear stack detected (highly hardened or behind CDN)")
+        ports = [int(p.strip()) for p in args.ports.split(',')]
 
-    print("\n🛡️  Hermes Banner grabber Use this to secure your site — not to attack others.")
+    grabber = BannerGrabber(timeout=args.timeout, verbose=args.verbose, stealth=args.stealth)
+    results = []
+    lock = threading.Lock()
+
+    print(f"Starting banner grab on {len(args.targets)} target(s) across {len(ports)} port(s)")
+    print(f"Using {args.threads} threads")
+
+    start_time = time.time()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as executor:
+        futures = []
+        for target in args.targets:
+            futures.append(executor.submit(scan_target, grabber, target, ports, results, lock))
+
+        concurrent.futures.wait(futures)
+
+    end_time = time.time()
+
+    # Filter out errors if not verbose
+    if not args.verbose:
+        results = [r for r in results if not r['error']]
+
+    print(f"\nScan completed in {end_time - start_time:.2f} seconds")
+    print(f"Found {len(results)} successful connections")
+
+    if results:
+        save_results(results, args.output, args.filename)
 
 if __name__ == "__main__":
     main()
