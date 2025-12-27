@@ -294,7 +294,7 @@ class BannerGrabber:
         except Exception as e:
             result['error'] = str(e)
             if self.verbose:
-                print(f"Error scanning {target}:{port} - {e}")
+                print(f"Error scanning {target}:{port} ({protocol}) - {e}")
 
         return result
 
@@ -433,26 +433,41 @@ class BannerGrabber:
         return ''
 
     def _grab_ftp_banner(self, target, port):
-        """Grab FTP banner"""
+        """Grab FTP banner with enhanced connection handling"""
+        sock = None
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(self.timeout)
-            sock.connect((target, port))
+            # Use ConnectionManager for reliable connections
+            sock = self.connection_manager.create_connection(target, port, use_ssl=False)
+
+            # Send FTP USER command to trigger banner response
+            sock.send(b"USER anonymous\r\n")
             banner = sock.recv(1024).decode(errors='ignore').strip()
+
+            # Extract clean banner (first line usually contains version)
+            banner_lines = banner.split('\n')
+            clean_banner = banner_lines[0] if banner_lines else banner
+
             sock.close()
+            sock = None
 
             server_info = {
-                'server': self._extract_server_info(banner, r'(\w+.*FTP.*)'),
-                'version': self._extract_version(banner)
+                'server': self._extract_server_info(clean_banner, r'(\w+.*FTP.*)'),
+                'version': self._extract_version(clean_banner)
             }
 
             return {
-                'banner': banner,
+                'banner': clean_banner,
                 'server_info': server_info
             }
 
         except Exception as e:
-            return {'error': str(e)}
+            if sock:
+                try:
+                    sock.close()
+                except:
+                    pass
+            self.logger.debug(f"FTP banner grab failed for {target}:{port}: {e}")
+            return {'error': f"FTP service unavailable or blocked: {str(e)}"}
 
     def _grab_ssh_banner(self, target, port):
         """Grab SSH banner"""
@@ -509,13 +524,13 @@ class BannerGrabber:
             return {'error': str(e)}
 
     def _grab_telnet_banner(self, target, port):
-        """Grab Telnet banner"""
+        """Grab Telnet banner with enhanced connection handling"""
+        sock = None
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(self.timeout)
-            sock.connect((target, port))
+            sock = self.connection_manager.create_connection(target, port, use_ssl=False)
             banner = sock.recv(1024).decode(errors='ignore').strip()
             sock.close()
+            sock = None
 
             server_info = {
                 'server': self._extract_server_info(banner, r'(\w+.*)'),
@@ -528,17 +543,23 @@ class BannerGrabber:
             }
 
         except Exception as e:
-            return {'error': str(e)}
+            if sock:
+                try:
+                    sock.close()
+                except:
+                    pass
+            self.logger.debug(f"Telnet banner grab failed for {target}:{port}: {e}")
+            return {'error': f"Telnet service unavailable: {str(e)}"}
 
     def _grab_rdp_banner(self, target, port):
-        """Grab RDP banner"""
+        """Grab RDP banner with enhanced connection handling"""
+        sock = None
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(self.timeout)
-            sock.connect((target, port))
+            sock = self.connection_manager.create_connection(target, port, use_ssl=False)
             # RDP initial response
             banner = sock.recv(1024).decode(errors='ignore')
             sock.close()
+            sock = None
 
             server_info = {
                 'server': 'Microsoft Terminal Services',
@@ -551,16 +572,22 @@ class BannerGrabber:
             }
 
         except Exception as e:
-            return {'error': str(e)}
+            if sock:
+                try:
+                    sock.close()
+                except:
+                    pass
+            self.logger.debug(f"RDP banner grab failed for {target}:{port}: {e}")
+            return {'error': f"RDP service unavailable: {str(e)}"}
 
     def _grab_generic_banner(self, target, port):
-        """Grab generic TCP banner"""
+        """Grab generic TCP banner with enhanced connection handling"""
+        sock = None
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(self.timeout)
-            sock.connect((target, port))
+            sock = self.connection_manager.create_connection(target, port, use_ssl=False)
             banner = sock.recv(1024).decode(errors='ignore').strip()
             sock.close()
+            sock = None
 
             server_info = {
                 'server': self._extract_server_info(banner, r'(\w+.*)'),
@@ -573,7 +600,13 @@ class BannerGrabber:
             }
 
         except Exception as e:
-            return {'error': str(e)}
+            if sock:
+                try:
+                    sock.close()
+                except:
+                    pass
+            self.logger.debug(f"Generic TCP banner grab failed for {target}:{port}: {e}")
+            return {'error': f"Service unavailable: {str(e)}"}
 
     def _extract_server_info(self, banner, pattern):
         """Extract server info using regex"""
