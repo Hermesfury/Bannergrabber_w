@@ -352,6 +352,7 @@ def main():
     parser.add_argument('-t', '--timeout', type=float, default=5.0, help='Connection timeout in seconds')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
     parser.add_argument('-s', '--stealth', action='store_true', help='Enable stealth mode (random delays)')
+    parser.add_argument('-w', '--waf-evasion', action='store_true', help='Enable WAF evasion techniques for HTTP requests')
     parser.add_argument('-o', '--output', choices=['json', 'csv'], default='json', help='Output format')
     parser.add_argument('-f', '--filename', help='Output filename (auto-generated if not specified)')
     parser.add_argument('--threads', type=int, default=10, help='Number of threads')
