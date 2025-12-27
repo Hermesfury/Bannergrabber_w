@@ -1,0 +1,59 @@
+[
+  {
+    "target": "45.60.97.183",
+    "port": 21,
+    "protocol": "FTP",
+    "timestamp": "2025-12-27T04:33:31.861896",
+    "banner": "\u0015\u0003\u0003\u0000\u0002\u0002\u0016",
+    "server_info": {
+      "server": "",
+      "version": ""
+    },
+    "error": null
+  },
+  {
+    "target": "45.60.97.183",
+    "port": 22,
+    "protocol": "SSH",
+    "timestamp": "2025-12-27T04:33:32.671657",
+    "banner": "",
+    "server_info": {},
+    "error": "timed out"
+  },
+  {
+    "target": "45.60.97.183",
+    "port": 80,
+    "protocol": "HTTP",
+    "timestamp": "2025-12-27T04:33:38.111593",
+    "banner": "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/html\r\nCache-Control: no-cache, no-store\r\nConnection: close\r\nContent-Length: 709\r\nX-Iinfo: 10-87159149-0 0NNN RT(1766806418920 5) q(0 -1 -1 -1) r(0 -1)\r\n\r\n<html style=\"height:100%\"><head><META NAME=\"ROBOTS\" CONTENT=\"NOINDEX, NOFOLLOW\"><meta name=\"f",
+    "server_info": {
+      "server": "",
+      "version": "",
+      "os_info": "",
+      "cdn": "",
+      "waf": "Incapsula",
+      "status_line": "HTTP/1.1 503 Service Unavailable\r",
+      "powered_by": "",
+      "content_type": "text/html"
+    },
+    "error": null
+  },
+  {
+    "target": "45.60.97.183",
+    "port": 443,
+    "protocol": "HTTPS",
+    "timestamp": "2025-12-27T04:33:38.983526",
+    "banner": "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/html\r\nCache-Control: no-cache, no-store\r\nConnection: close\r\nContent-Length: 711\r\nX-Iinfo: 9-61607907-0 0NNN RT(1766806419860 527) q(0 -1 -1 -1) r(0 -1)\r\n\r\n<html style=\"height:100%\"><head><META NAME=\"ROBOTS\" CONTENT=\"NOINDEX, NOFOLLOW\"><meta name=\"",
+    "server_info": {
+      "server": "",
+      "version": "",
+      "os_info": "",
+      "cdn": "",
+      "waf": "Incapsula",
+      "status_line": "HTTP/1.1 503 Service Unavailable\r",
+      "powered_by": "",
+      "content_type": "text/html"
+    },
+    "error": null
+  }
+]
