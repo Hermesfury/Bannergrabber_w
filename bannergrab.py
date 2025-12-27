@@ -16,6 +16,8 @@ import random
 import re
 import concurrent.futures
 import logging
+import base64
+from urllib.parse import quote
 
 # Default common service ports
 DEFAULT_PORTS = {
@@ -239,11 +241,12 @@ class FingerprintEngine:
         return ''
 
 class BannerGrabber:
-    def __init__(self, timeout=5, verbose=False, stealth=False, max_retries=3):
+    def __init__(self, timeout=5, verbose=False, stealth=False, max_retries=3, waf_evasion=False):
         self.timeout = timeout
         self.verbose = verbose
         self.stealth = stealth
         self.max_retries = max_retries
+        self.waf_evasion = waf_evasion
 
         # Initialize core components
         self.connection_manager = ConnectionManager(max_retries=max_retries, base_timeout=timeout)
@@ -261,6 +264,79 @@ class BannerGrabber:
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
             self.logger.setLevel(logging.INFO if self.verbose else logging.WARNING)
+
+    def _get_random_user_agent(self):
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.101 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
+            "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0"
+        ]
+        return random.choice(user_agents)
+
+    def _encode_payload(self, payload, encoding):
+        if encoding == 'base64':
+            return base64.b64encode(payload.encode()).decode()
+        elif encoding == 'url':
+            return quote(payload)
+        else:
+            return payload
+
+    def _fragment_request(self, request, fragments):
+        # Split the request into fragments
+        lines = request.split('\r\n')
+        fragmented = []
+        for i in range(0, len(lines), fragments):
+            fragmented.append('\r\n'.join(lines[i:i+fragments]))
+        return fragmented
+
+    def _add_custom_headers(self, headers):
+        custom_headers = {
+            'X-Forwarded-For': f'192.168.{random.randint(1,255)}.{random.randint(1,255)}',
+            'X-Real-IP': f'10.0.{random.randint(1,255)}.{random.randint(1,255)}',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referer': 'https://www.google.com/'
+        }
+        headers.update(custom_headers)
+        return headers
+
+    def _apply_waf_evasion(self, request):
+        # Randomize User-Agent
+        ua = self._get_random_user_agent()
+        request = request.replace("User-Agent: Mozilla/5.0 (compatible; BannerGrabber/1.0)\r\n", f"User-Agent: {ua}\r\n")
+
+        # Add custom headers
+        headers_part = request.split('\r\n\r\n')[0]
+        headers_lines = headers_part.split('\r\n')
+        headers_dict = {}
+        for line in headers_lines[1:]:
+            if ': ' in line:
+                k, v = line.split(': ', 1)
+                headers_dict[k] = v
+        headers_dict = self._add_custom_headers(headers_dict)
+        new_headers = '\r\n'.join([f"{k}: {v}" for k, v in headers_dict.items()])
+        request = request.replace(headers_part, f"{headers_lines[0]}\r\n{new_headers}")
+
+        # Encode payload if needed (for GET requests, encode query)
+        if 'GET' in request and '?' in request:
+            url_part = request.split('\r\n')[0].split(' ')[1]
+            if '?' in url_part:
+                base, query = url_part.split('?', 1)
+                encoded_query = self._encode_payload(query, 'url')
+                request = request.replace(url_part, f"{base}?{encoded_query}")
+
+        # Fragment request if needed
+        fragmented = self._fragment_request(request, 2)
+        if len(fragmented) > 1:
+            # For simplicity, send the first fragment, but in real, send multiple
+            request = fragmented[0]
+
+        # Add timing delay
+        time.sleep(random.uniform(0.1, 0.5))
+
+        return request
 
     def grab_banner(self, target, port):
         """Grab banner from target:port"""
@@ -322,7 +398,27 @@ class BannerGrabber:
                 "Connection: close\r\n\r\n"
             )
 
-            sock.send(request.encode())
+            if self.waf_evasion:
+                # Apply WAF evasion techniques
+                # Header manipulation: randomize User-Agent
+                ua = self._get_random_user_agent()
+                request = request.replace("User-Agent: Mozilla/5.0 (compatible; BannerGrabber/1.0)\r\n", f"User-Agent: {ua}\r\n")
+
+                # Add custom headers
+                headers = self._add_custom_headers({})
+                custom_headers_str = '\r\n'.join([f"{k}: {v}" for k, v in headers.items()]) + '\r\n'
+                request = request.replace(f"Host: {target}\r\n", f"Host: {target}\r\n{custom_headers_str}")
+
+                # Payload encoding: not applicable for HEAD /
+
+                # Request fragmentation: send request in parts with delays
+                parts = [request[i:i+50] for i in range(0, len(request), 50)]  # Split into 50-byte chunks
+                for part in parts:
+                    sock.send(part.encode())
+                    time.sleep(random.uniform(0.1, 0.5))  # Timing delay
+            else:
+                sock.send(request.encode())
+
             response = sock.recv(8192).decode(errors='ignore')
             sock.close()
 
@@ -703,7 +799,8 @@ def main():
     else:
         ports = [int(p.strip()) for p in args.ports.split(',')]
 
-    grabber = BannerGrabber(timeout=args.timeout, verbose=args.verbose, stealth=args.stealth, max_retries=3)
+    grabber = BannerGrabber(timeout=args.timeout, verbose=args.verbose, stealth=args.stealth, max_retries=3, waf_evasion=args.waf_evasion)
+
     results = []
     lock = threading.Lock()
 

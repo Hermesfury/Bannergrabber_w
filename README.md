@@ -40,6 +40,9 @@ python bannergrab.py example.com -p 80,443,8080
 
 # Verbose output with detailed logging
 python bannergrab.py example.com -p 80,443 -v
+
+# stealth specific ports
+python bannergrab.py example.com.ng -p 21,22,80,443 -v -s
 ```
 
 ### Advanced Reconnaissance
@@ -204,6 +207,8 @@ This tool is designed for authorized security research and penetration testing o
 
 **Unauthorized use may violate laws and terms of service.**
 
+
 ---
+**important note if the site is giving error kindly confirm that the ip address isnt a cloud ip from the waf you understand what i mean**
 
 **Remember**: In cybersecurity, "access denied" often means "security working correctly" 🔒
